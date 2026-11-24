@@ -1,0 +1,23 @@
+# Dependencies
+/node_modules/
+
+# Local configuration and credentials
+/.env
+/.env.*
+!/.env.example
+
+# Tracker and historical incident data
+/tracker-paste.txt
+/dataset*.csv
+
+# Generated workflow output and browser state
+/run/
+/brave-profile-backup/
+/snow-form.html
+**/session-state.json
+/playwright-report/
+/test-results/
+
+# Local logs and temporary files
+*.log
+*.tmp

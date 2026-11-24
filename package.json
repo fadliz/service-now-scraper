@@ -1,0 +1,17 @@
+{
+  "name": "servicenow-incident-workflow",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "prepare": "node src/workflow.mjs prepare",
+    "fill": "node src/workflow.mjs fill",
+    "submit": "node src/workflow.mjs fill --submit",
+    "check": "node --check src/workflow.mjs",
+    "clean": "node src/workflow.mjs clean",
+    "parse": "node src/workflow.mjs parse"
+  },
+  "dependencies": {
+    "playwright": "^1.58.0"
+  }
+}
