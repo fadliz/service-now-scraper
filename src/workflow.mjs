@@ -15,6 +15,7 @@ const SESSION_DIR = process.env.LOCALAPPDATA
   ? path.join(process.env.LOCALAPPDATA, 'ServiceNowIncidentWorkflow')
   : RUN;
 const SESSION_PATH = path.join(SESSION_DIR, 'session-state.json');
+const MAX_BATCH_SIZE = 8;
 
 loadDotEnv(path.join(ROOT, '.env'));
 fs.mkdirSync(RUN, { recursive: true });
@@ -48,10 +49,9 @@ const ISSUE_TRANSLATIONS = [
 const args = new Set(process.argv.slice(2));
 const command = process.argv[2] || 'prepare';
 const submit = args.has('--submit');
-const all = args.has('--all') || Boolean(CONFIG.trackerTextPath);
 
 if (!['prepare', 'parse', 'clean', 'fill'].includes(command)) {
-  throw new Error('Use: prepare | parse | clean | fill [--submit] [--all]');
+  throw new Error('Use: prepare | parse | clean | fill [--submit]');
 }
 
 if (command === 'prepare') {
@@ -77,7 +77,8 @@ if (command === 'prepare') {
   if (!queue.length) {
     throw new Error(`No non-duplicate draft is available. Rows with an existing Snow Ticket or duplicate warning are excluded. Review ${DRAFT_PATH}.`);
   }
-  await runForms(all ? queue : queue.slice(0, 1), submit);
+  const batchSize = submit ? 1 : await promptForBatchSize();
+  await runForms(queue, submit, batchSize);
 }
 
 function prepareDrafts() {
@@ -113,7 +114,9 @@ function makeDraft(row, training) {
   const categoryContext = `${row['Request Type'] || ''} ${row['Judul email'] || ''} ${issue}`;
   const category = matched?.category || mapCategory(row['Category'], categoryContext);
   const serviceCategory = clean(row['Service Category']);
-  const subcategory = matched?.subcategory || mapSubcategory(category, serviceCategory);
+  const subcategory = isMeetingRoomRequest(category, categoryContext)
+    ? 'Inquiry / Help'
+    : matched?.subcategory || mapSubcategory(category, serviceCategory);
   const affectedService = subcategory ? `${category} - ${subcategory}` : category;
   const duplicate = findLikelyDuplicate(training, actualUser, entity, issue);
   return {
@@ -147,35 +150,69 @@ function makeDraft(row, training) {
   };
 }
 
-async function runForms(items, shouldSubmit) {
+async function runForms(items, shouldSubmit, batchSize = 1) {
   const session = await openBraveSession();
   const { browser, context, page, closeWhenDone } = session;
   const results = [];
   let completed = false;
 
   try {
-    for (const draft of items) {
-      if (shouldSubmit && draft.state === 'Resolved') {
-        throw new Error('Automatic submission is disabled for Resolved drafts. The form remains a draft for review.');
-      }
-      console.log(`Opening ${draft.trackerNumber} (source ${draft.rowNumber})`);
-      await openIncidentForm(page);
-      await fillDefaultView(page, draft);
+    if (shouldSubmit) {
+      for (const draft of items) {
+        if (draft.state === 'Resolved') {
+          throw new Error('Automatic submission is disabled for Resolved drafts. The form remains a draft for review.');
+        }
+        console.log(`Opening ${draft.trackerNumber} (source ${draft.rowNumber})`);
+        await openIncidentForm(page);
+        await fillDefaultView(page, draft);
 
-      if (!shouldSubmit) {
-        console.log(`Draft filled for ${draft.trackerNumber}. Review it in Brave and submit manually if approved.`);
-        console.log('After reviewing/submitting, press Enter in this terminal to continue.');
+        await page.getByRole('button', { name: 'Submit', exact: true }).last().click();
+        await page.waitForLoadState('domcontentloaded');
+        const incidentNumber = await verifiedIncidentNumber(page);
+        results.push(finalizeIncident(draft, incidentNumber, 'automatic'));
+        console.log(`Submitted ${incidentNumber}; recorded ${draft.trackerNumber}.`);
+      }
+    } else {
+      await ensureAuthenticated(page);
+      const batches = splitIntoBatches(items, batchSize);
+      const pages = [page];
+      const pageCount = Math.min(batchSize, items.length);
+      for (let index = 1; index < pageCount; index += 1) {
+        pages.push(await context.newPage());
+      }
+
+      for (let batchIndex = 0; batchIndex < batches.length; batchIndex += 1) {
+        const batch = batches[batchIndex];
+        console.log(`Filling batch ${batchIndex + 1}/${batches.length} (${batch.length} ticket(s)).`);
+        const fillResults = await Promise.allSettled(batch.map(async (draft, index) => {
+          const draftPage = pages[index];
+          console.log(`Opening ${draft.trackerNumber} (source ${draft.rowNumber})`);
+          await openIncidentForm(draftPage, { authenticated: true });
+          await fillDefaultView(draftPage, draft);
+          await draftPage.evaluate((trackerNumber) => {
+            document.title = `${trackerNumber} - ${document.title}`;
+          }, draft.trackerNumber);
+          return draftPage;
+        }));
+        const failures = fillResults.flatMap((result, index) => result.status === 'rejected'
+          ? [new Error(`${batch[index].trackerNumber}: ${result.reason?.message || String(result.reason)}`, { cause: result.reason })]
+          : []);
+        if (failures.length) {
+          throw new AggregateError(
+            failures,
+            `Failed to fill ${failures.length} draft(s) in batch ${batchIndex + 1}.`,
+          );
+        }
+
+        console.log('Drafts filled. Review and submit these forms in Brave before continuing:');
+        for (const [index, draft] of batch.entries()) {
+          console.log(`  Tab ${index + 1}: ${draft.trackerNumber} (source ${draft.rowNumber})`);
+        }
+        console.log('Press Enter after reviewing/submitting this batch to open the next batch.');
         await waitForEnter();
-        const result = await markManualSubmissionIfDetected(page, draft);
-        if (result) results.push(result);
-        continue;
+        const batchResults = await Promise.all(batch.map((draft, index) => markManualSubmissionIfDetected(pages[index], draft)));
+        results.push(...batchResults.filter(Boolean));
       }
-
-      await page.getByRole('button', { name: 'Submit', exact: true }).last().click();
-      await page.waitForLoadState('domcontentloaded');
-      const incidentNumber = await verifiedIncidentNumber(page);
-      results.push(finalizeIncident(draft, incidentNumber, 'automatic'));
-      console.log(`Submitted ${incidentNumber}; recorded ${draft.trackerNumber}.`);
     }
     if (closeWhenDone && !shouldSubmit) {
       console.log('Review and submit in Brave. Press Enter only when you are ready to close the browser.');
@@ -221,8 +258,8 @@ async function openBraveSession() {
   return { browser, context, page: await context.newPage(), closeWhenDone: true };
 }
 
-async function openIncidentForm(page) {
-  await ensureAuthenticated(page);
+async function openIncidentForm(page, { authenticated = false } = {}) {
+  if (!authenticated) await ensureAuthenticated(page);
 
   if (CONFIG.dashboardUrl) {
     await safeGoto(page, CONFIG.dashboardUrl);
@@ -395,6 +432,53 @@ async function markManualSubmissionIfDetected(page, draft) {
 function finalizeIncident(draft, incidentNumber, mode) {
   return { trackerTicket: draft.trackerNumber, serviceNowTicket: incidentNumber, sourceRow: draft.rowNumber, mode };
 }
+
+async function promptForBatchSize() {
+  if (!process.stdin.isTTY) {
+    throw new Error('Batch drafting requires an interactive terminal so you can choose the batch size and review each batch.');
+  }
+  while (true) {
+    const input = await readTerminalLine(`Tickets per batch (1-${MAX_BATCH_SIZE}): `);
+    try {
+      return parseBatchSize(input);
+    } catch (error) {
+      if (!(error instanceof RangeError)) throw error;
+      console.error(error.message);
+    }
+  }
+}
+
+function readTerminalLine(prompt) {
+  process.stdout.write(prompt);
+  process.stdin.resume();
+  return new Promise((resolve) => {
+    process.stdin.once('data', (data) => resolve(data.toString().trim()));
+  });
+}
+
+function parseBatchSize(input) {
+  const value = String(input).trim();
+  if (!/^\d+$/.test(value)) {
+    throw new RangeError(`Enter a whole number between 1 and ${MAX_BATCH_SIZE}.`);
+  }
+  const batchSize = Number(value);
+  if (batchSize < 1 || batchSize > MAX_BATCH_SIZE) {
+    throw new RangeError(`Batch size must be between 1 and ${MAX_BATCH_SIZE}.`);
+  }
+  return batchSize;
+}
+
+function splitIntoBatches(items, batchSize) {
+  if (!Number.isInteger(batchSize) || batchSize < 1 || batchSize > MAX_BATCH_SIZE) {
+    throw new RangeError(`Batch size must be between 1 and ${MAX_BATCH_SIZE}.`);
+  }
+  const batches = [];
+  for (let index = 0; index < items.length; index += batchSize) {
+    batches.push(items.slice(index, index + batchSize));
+  }
+  return batches;
+}
+
 function waitForEnter() {
   if (!process.stdin.isTTY) throw new Error('Manual review requires an interactive terminal; run fill from a terminal so Brave stays available.');
   return new Promise((resolve) => {
@@ -561,7 +645,7 @@ async function selectReferenceFromLookup(page, field, value) {
   if (!await lookup.isVisible().catch(() => false)) return false;
 
   const [popup] = await Promise.all([
-    page.context().waitForEvent('page', { timeout: 5000 }).catch((error) => {
+    page.waitForEvent('popup', { timeout: 5000 }).catch((error) => {
       if (error?.name === 'TimeoutError') return null;
       throw error;
     }),
@@ -589,8 +673,14 @@ async function selectReferenceFromLookup(page, field, value) {
       }
       const matchIndex = bestReferenceMatchIndex(labels, value);
       if (matchIndex >= 0) {
-        await records.nth(matchIndex).click();
-        return waitForReferenceValue(page, field);
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) break;
+        try {
+          await records.nth(matchIndex).click({ timeout: Math.min(1500, remaining) });
+          return waitForReferenceValue(page, field);
+        } catch (error) {
+          if (error?.name !== 'TimeoutError') throw error;
+        }
       }
       await popup.waitForTimeout(250);
     }
@@ -824,6 +914,10 @@ function mapCategory(value, context = '') {
     'Inquiry / Help',
   ];
   return validCategories.find((category) => normalize(category) === normalized) || 'Inquiry / Help';
+}
+function isMeetingRoomRequest(category, context) {
+  if (normalize(category) !== 'service request') return false;
+  return /\b(?:meeting\s*rooms?|room\s*meeting|ruang\s*(?:meeting|rapat))\b/.test(normalize(context));
 }
 function mapChannel(value) {
   return /whats\s?app?|teams?|chat/i.test(value) ? 'Chat'

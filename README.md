@@ -5,7 +5,7 @@ Workflow automation for the **classic/default ServiceNow Incident form** demonst
 ## Safety and operating model
 
 - `prepare` is read-only. It creates `run/drafts.json` with eligible incidents and any duplicate warnings.
-- `fill` opens one ticket draft at a time at `SNOW_URL`, **does not click Submit**, and keeps the browser open for manual review. Press Enter after reviewing/submitting to continue; after all rows, press Enter again only when you want to close Brave. Manually submitted tickets are recorded only when ServiceNow confirms the save and exposes an incident number; otherwise the workflow warns and continues without recording that ticket.
+- `fill` asks for a batch size from 1 to 8, opens one form tab per ticket in that batch, and fills the forms concurrently. It **does not click Submit**. Review and submit the batch manually, then press Enter once to continue. After the final batch, press Enter again only when you want to close Brave. Manually submitted tickets are recorded only when ServiceNow confirms the save and exposes an incident number; otherwise the workflow warns and continues without recording that ticket.
 - `submit` is the explicit opt-in action that creates the ServiceNow record and records the result in `run\servicenow-incidents.json`.
 
 ## Tracker paste input (`.txt`)
@@ -28,10 +28,10 @@ The cleaned data is saved to `run\cleaned-tracker.json`; draft tickets are saved
 
 ## Multiple incident creation
 
-Set `DASHBOARD_URL` to the dashboard page used by the workflow. For each selected tracker row, it opens the dashboard and clicks the **Input New Incident** widget when present, then opens `SNOW_URL` directly as a fallback. It fills one incident, waits for your manual review/submission, then moves to the next row after you press **Enter** in the terminal. At the end of `fill`, Brave remains open until you press Enter again to close it.
+Set `DASHBOARD_URL` to the dashboard page used by the workflow. For each selected tracker row, it opens the dashboard and clicks the **Input New Incident** widget when present, then opens `SNOW_URL` directly as a fallback. For `fill`, enter the desired batch size when prompted (1–8). The workflow opens that many tabs (or fewer if fewer eligible tickets remain), fills them concurrently, and waits for you to review/submit all forms in the batch before continuing. Pages are reused for subsequent batches. After the last batch, Brave remains open until you press Enter again to close it.
 
 ```powershell
-node src/workflow.mjs fill --all
+node src/workflow.mjs fill
 ```
 
 After the run, successfully submitted incidents are listed in `run\servicenow-incidents.json`.
@@ -92,14 +92,14 @@ To attach to an already logged-in Brave session, start Brave manually with CDP e
 # Build drafts for rows with a blank Snow Ticket, regardless of ticket date.
 npm run prepare
 
-# Fill only the first eligible form. It leaves the draft open for human review.
+# Fill all eligible forms in batches of the size you enter at the prompt (1-8).
 npm run fill
 
-# Submit the form and record the result in run\servicenow-incidents.json.
+# Explicitly submit eligible forms sequentially and record results.
 npm run submit
 ```
 
-Use `--all` after `fill` or `submit` to process every eligible record rather than only the first one.
+Draft `fill` processes all eligible non-duplicate records in consecutive batches. `--submit` remains a separate explicit opt-in path and does not prompt for a batch size.
 
 ## Implemented business rules
 
@@ -109,7 +109,7 @@ Use `--all` after `fill` or `submit` to process every eligible record rather tha
 4. **Location** is selected as a valid reference only for a valid non-default caller and a non-empty `Entity`. If the entity does not match an option, the workflow can recommend a unique historical `Location` from the training CSV for the same Business User or Caller; unresolved values are cleared with a warning.
 5. Service and Service Offering are always cleared for this workflow.
 6. Excel `VIP` values `Y`, `YES`, `VIP`, or `TRUE` map to VIP; all other values (including `N`) map to Non VIP.
-7. Raw category `Service` maps to **Service Request** unless the source is strictly an inquiry; `Request` maps to **Service Request**. Service Category is mapped to a matching subcategory when available (for example, Hardware / Printer maps to **Printing**). If no matching subcategory is available, `-- None --` is selected.
+7. Raw category `Service` maps to **Service Request** unless the source is strictly an inquiry; `Request` maps to **Service Request**. A **Service Request** about a meeting room uses **Inquiry / Help** as its subcategory. Other Service Category values are mapped to a matching subcategory when available (for example, Hardware / Printer maps to **Printing**). If no matching subcategory is available, `-- None --` is selected.
 8. Work notes are populated in the **Notes** tab. Pending statuses map to **On Hold**, and use `Pending Reason` as the work note. The script removes internal `INC...` or long numeric ticket references from work notes.
 9. Resolved drafts use **Solution Provided** and the source ticket's notes for Resolution Notes. If the source has no resolution details, the field states that explicitly. Automatic submit remains disabled for Resolved drafts.
 10. On-hold reasons are selected only when `Pending Reason` maps to an available reason (for example, `Waiting Confirmation Lenovo` → **Awaiting Vendor**); otherwise the form's `-- None --` remains selected.
