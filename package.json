@@ -9,7 +9,8 @@
     "submit": "node src/workflow.mjs fill --submit",
     "check": "node --check src/workflow.mjs",
     "clean": "node src/workflow.mjs clean",
-    "parse": "node src/workflow.mjs parse"
+    "parse": "node src/workflow.mjs parse",
+    "parse-csv": "node src/workflow.mjs parse-csv"
   },
   "dependencies": {
     "playwright": "^1.58.0"

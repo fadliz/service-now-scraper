@@ -10,7 +10,7 @@ Workflow automation for the **classic/default ServiceNow Incident form** demonst
 
 ## Tracker paste input (`.txt`)
 
-Select the required columns in Excel and paste the copied Markdown-style table into `tracker-paste.txt` in the project root. Commands use that file by default. To use a different file, set `TRACKER_TXT`. The parser handles blank cells, separator rows, HTML `<br>` values, non-breaking spaces, and trailing empty columns.
+Select the required columns in Excel and paste the copied table into `tracker-paste.txt` in the project root. Commands use that file by default. To use a different file, set `TRACKER_TXT`. The parser auto-detects Markdown tables and tab-, comma-, or semicolon-delimited data, and handles blank cells, quoted fields, HTML `<br>` values, non-breaking spaces, and trailing empty columns.
 
 ```text
 TRACKER_TXT=tracker-paste.txt
@@ -25,6 +25,15 @@ npm run prepare
 ```
 
 The cleaned data is saved to `run\cleaned-tracker.json`; draft tickets are saved to `run\drafts.json`.
+
+For comma- or semicolon-delimited tracker files, set `TRACKER_TXT` to the input file and run the CSV parser:
+
+```powershell
+$env:TRACKER_TXT='tracker-paste.csv'
+node src/workflow.mjs parse-csv
+```
+
+`parse-csv` detects comma versus semicolon from the header and supports quoted fields, including fields with line breaks. It writes the same `run\cleaned-tracker.json` output as `parse`.
 
 ## Multiple incident creation
 
@@ -97,6 +106,9 @@ npm run fill
 
 # Explicitly submit eligible forms sequentially and record results.
 npm run submit
+
+# Parse a comma- or semicolon-delimited tracker file to cleaned-tracker.json.
+node src/workflow.mjs parse-csv
 ```
 
 Draft `fill` processes all eligible non-duplicate records in consecutive batches. `--submit` remains a separate explicit opt-in path and does not prompt for a batch size.

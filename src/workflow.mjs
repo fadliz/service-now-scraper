@@ -50,8 +50,8 @@ const args = new Set(process.argv.slice(2));
 const command = process.argv[2] || 'prepare';
 const submit = args.has('--submit');
 
-if (!['prepare', 'parse', 'clean', 'fill'].includes(command)) {
-  throw new Error('Use: prepare | parse | clean | fill [--submit]');
+if (!['prepare', 'parse', 'parse-csv', 'clean', 'fill'].includes(command)) {
+  throw new Error('Use: prepare | parse | parse-csv | clean | fill [--submit]');
 }
 
 if (command === 'prepare') {
@@ -65,6 +65,10 @@ if (command === 'prepare') {
   const rows = loadSelectedTrackerRows();
   writeJson(CLEAN_PATH, { cleanedAt: new Date().toISOString(), rows });
   console.log(`Parsed ${rows.length} tracker row(s). Output: ${CLEAN_PATH}`);
+} else if (command === 'parse-csv') {
+  const rows = loadCsvTrackerRows(CONFIG.trackerTextPath);
+  writeJson(CLEAN_PATH, { cleanedAt: new Date().toISOString(), rows });
+  console.log(`Parsed ${rows.length} CSV tracker row(s). Output: ${CLEAN_PATH}`);
 } else if (command === 'clean') {
   for (const generatedFile of [CLEAN_PATH, DRAFT_PATH, RESULT_PATH]) fs.rmSync(generatedFile, { force: true });
   console.log('Removed generated run files: cleaned-tracker.json, drafts.json, and servicenow-incidents.json.');
@@ -495,7 +499,10 @@ async function fillDefaultView(page, draft) {
   await page.locator('#incident\\.u_business_user').fill(draft.actualUser);
   await page.locator('#sys_display\\.incident\\.business_service').fill('');
   await page.locator('#sys_display\\.incident\\.service_offering').fill('');
-  const locationCandidate = usingDefaultCaller ? '' : draft.locationCandidate;
+  const allowedLocationEntities = ['BPI', 'DIM', 'DAM'];
+  const locationCandidate = !allowedLocationEntities.includes(normalize(draft.entity))
+    ? ''
+    : draft.locationCandidate;
   const locationSelected = await fillAndSelectReference(
     page,
     '#sys_display\\.incident\\.location',
@@ -731,10 +738,41 @@ function loadSelectedTrackerRows() {
 function loadPastedTrackerRows(filePath) {
   if (!fs.existsSync(filePath)) throw new Error(`Tracker text file was not found: ${filePath}`);
   const raw = fs.readFileSync(filePath, 'utf8').replace(/^\uFEFF/, '');
-  const cellsByRow = raw.trimStart().startsWith('|')
-    ? raw.split(/\r?\n/).map(parseMarkdownTableRow)
-    : parseDelimitedRecords(raw, '\t');
+  let cellsByRow;
+  if (raw.trimStart().startsWith('|')) {
+    cellsByRow = raw.split(/\r?\n/).map(parseMarkdownTableRow);
+  } else {
+    const firstLine = raw.split(/\r?\n/, 1)[0] || '';
+    const tabCount = countUnquotedDelimiter(firstLine, '\t');
+    const commaCount = countUnquotedDelimiter(firstLine, ',');
+    const semicolonCount = countUnquotedDelimiter(firstLine, ';');
+    const delimiter = tabCount >= commaCount && tabCount >= semicolonCount && tabCount > 0
+      ? '\t'
+      : commaCount >= semicolonCount && commaCount > 0
+        ? ','
+        : semicolonCount > 0
+          ? ';'
+          : '\t';
+    cellsByRow = parseDelimitedRecords(raw, delimiter);
+  }
 
+  return mapTrackerRows(cellsByRow);
+}
+
+function loadCsvTrackerRows(filePath) {
+  if (!fs.existsSync(filePath)) throw new Error(`Tracker text file was not found: ${filePath}`);
+  const raw = fs.readFileSync(filePath, 'utf8').replace(/^\uFEFF/, '');
+  const firstLine = raw.split(/\r?\n/, 1)[0] || '';
+  const commaCount = countUnquotedDelimiter(firstLine, ',');
+  const semicolonCount = countUnquotedDelimiter(firstLine, ';');
+  if (!commaCount && !semicolonCount) {
+    throw new Error(`Tracker file is not comma- or semicolon-delimited: ${filePath}`);
+  }
+  const delimiter = commaCount >= semicolonCount ? ',' : ';';
+  return mapTrackerRows(parseDelimitedRecords(raw, delimiter));
+}
+
+function mapTrackerRows(cellsByRow) {
   return cellsByRow
     .filter((cells) => cells.length && /^\d{8,}$/.test(clean(cells[0])))
     .map((cells, index) => {
