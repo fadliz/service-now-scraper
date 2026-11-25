@@ -1,6 +1,6 @@
 # ServiceNow Incident Workflow
 
-Workflow automation for the **classic/default ServiceNow Incident form** demonstrated in the current session. It processes rows from `tracker-paste.txt` regardless of ticket date, skips any row that already has `Snow Ticket`, detects likely duplicates from `dataset_incident.csv`, fills the ServiceNow form, and only submits when explicitly invoked with `--submit`.
+Workflow automation for the **classic/default ServiceNow Incident form** demonstrated in the current session. It processes rows from `tracker-paste.txt` regardless of ticket date, skips any row that already has `Snow Ticket`, checks for likely duplicates when matching history includes a Location, fills the ServiceNow form, and only submits when explicitly invoked with `--submit`.
 
 ## Safety and operating model
 
@@ -47,7 +47,7 @@ Set the paths in `.env` or through environment variables:
 
 ```text
 TRACKER_TXT=tracker-paste.txt
-TRAINING_CSV=C:\Users\MohamadNorhavid\Downloads\dataset_incident.csv
+TRAINING_CSV=dataset_incident.csv
 SNOW_URL=https://your-instance.service-now.com/incident.do?sys_id=-1
 ```
 
@@ -117,10 +117,14 @@ Use `--all` after `fill` or `submit` to process every eligible record rather tha
 
 ## Improving Location recommendations
 
-The workflow reads `TRAINING_CSV` each time it prepares drafts. To teach it a Location value that works in your ServiceNow form:
+The workflow reads `TRAINING_CSV` each time it prepares drafts. It accepts comma- or semicolon-delimited CSV, including quoted fields, and recognizes common export headers such as `u_business_user` and `caller_id` when matching people. History-based duplicate warnings also require a matching Location, so the supplied export cannot produce those warnings until it includes Location.
+
+The supplied 30-row export has no `Location` column, so it cannot teach Location values; `prepare` warns when this is the case. It also lacks category, impact, urgency, hold reason, and resolution fields. Subcategory is blank in 19 rows, and some populated values are category-like rather than subcategory values, so the workflow does not infer form choices from this history. The export is resolved-heavy (26 of 30 records), and its historical states are not used to choose a draft status. To train Location recommendations, re-export the history with the exact Location display value and a Business User or Caller column.
+
+To teach it a Location value that works in your ServiceNow form:
 
 1. Review the filled draft. If Location is blank or incorrect, select the correct Location reference in ServiceNow.
-2. Add or correct that ticket's historical row in the CSV configured by `TRAINING_CSV`, including `Business_User` (or `Business User`), `Caller`, and the exact `Location` display value from the form.
+2. Add or correct that ticket's historical row in the CSV configured by `TRAINING_CSV`, including `Business_User` (or `u_business_user`), `Caller` (or `caller_id`), and the exact `Location` display value from the form.
 3. Run `npm run prepare` again. `run\drafts.json` shows `locationCandidate` and whether it came from `dataset` history or the tracker `Entity`. The workflow uses a unique most-common historical Location for a matching user; ties fall back to the tracker Entity.
 
 The script reads but never edits the training CSV. A recommended value is still selected only if ServiceNow offers it as a valid Location reference.

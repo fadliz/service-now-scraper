@@ -21,7 +21,7 @@ fs.mkdirSync(RUN, { recursive: true });
 
 const CONFIG = {
   trackerTextPath: path.resolve(ROOT, process.env.TRACKER_TXT || 'tracker-paste.txt'),
-  trainingCsvPath: mustEnv('TRAINING_CSV'),
+  trainingCsvPath: path.resolve(ROOT, mustEnv('TRAINING_CSV')),
   snowUrl: mustEnv('SNOW_URL'),
   dashboardUrl: process.env.DASHBOARD_URL || '',
   defaultCaller: process.env.DEFAULT_CALLER || 'operational user1',
@@ -82,7 +82,13 @@ if (command === 'prepare') {
 
 function prepareDrafts() {
   const rows = loadSelectedTrackerRows();
-  const training = parseSemiColonCsv(CONFIG.trainingCsvPath);
+  const training = parseTrainingCsv(CONFIG.trainingCsvPath);
+  if (training.length && !hasDatasetColumn(training, 'Location', 'location')) {
+    console.warn('TRAINING_CSV has no Location column; history-based Location recommendations require adding Location to the CSV.');
+  }
+  if (training.length && !hasDatasetColumn(training, 'Business_User', 'Business User', 'u_business_user', 'Caller', 'caller_id')) {
+    console.warn('TRAINING_CSV has no Business User or Caller column; person-based history matching is unavailable.');
+  }
   const items = rows
     .filter((row) => !String(row['Snow Ticket'] || '').trim())
     .map((row) => makeDraft(row, training));
@@ -682,30 +688,55 @@ function cleanTrackerCell(value) {
     .replace(/\r/g, '')
     .trim();
 }
-function parseSemiColonCsv(filePath) {
-  const [head, ...lines] = fs.readFileSync(filePath, 'utf8').replace(/^\uFEFF/, '').trim().split(/\r?\n/);
-  const headers = parseCsvLine(head, ';');
-  return lines.map((line) => Object.fromEntries(headers.map((header, index) => [header, parseCsvLine(line, ';')[index] ?? ''])));
+function parseTrainingCsv(filePath) {
+  const raw = fs.readFileSync(filePath, 'utf8').replace(/^\uFEFF/, '');
+  const firstLine = raw.split(/\r?\n/, 1)[0] || '';
+  const delimiter = countUnquotedDelimiter(firstLine, ',') > countUnquotedDelimiter(firstLine, ';') ? ',' : ';';
+  const [headerRow, ...dataRows] = parseDelimitedRecords(raw, delimiter);
+  if (!headerRow?.length) throw new Error(`Training CSV has no header row: ${filePath}`);
+  const headers = headerRow.map((header) => header.trim());
+  return dataRows
+    .filter((row) => row.some((value) => clean(value)))
+    .map((row) => Object.fromEntries(headers.map((header, index) => [header, row[index] ?? ''])));
 }
 
-function parseCsvLine(line, delimiter) {
-  const result = []; let value = ''; let quoted = false;
-  for (let i = 0; i < line.length; i += 1) {
-    const char = line[i]; const next = line[i + 1];
-    if (char === '"' && quoted && next === '"') { value += '"'; i += 1; }
-    else if (char === '"') quoted = !quoted;
-    else if (char === delimiter && !quoted) { result.push(value); value = ''; }
-    else value += char;
+function countUnquotedDelimiter(line, delimiter) {
+  let count = 0;
+  let quoted = false;
+  for (let index = 0; index < line.length; index += 1) {
+    const character = line[index];
+    if (character === '"' && quoted && line[index + 1] === '"') index += 1;
+    else if (character === '"') quoted = !quoted;
+    else if (character === delimiter && !quoted) count += 1;
   }
-  result.push(value); return result;
+  return count;
+}
+
+function hasDatasetColumn(records, ...names) {
+  if (!records.length) return false;
+  const available = new Set(Object.keys(records[0]).map(normalizeDatasetField));
+  return names.some((name) => available.has(normalizeDatasetField(name)));
+}
+
+function datasetField(record, ...names) {
+  const wanted = new Set(names.map(normalizeDatasetField));
+  const entry = Object.entries(record).find(([name, value]) => wanted.has(normalizeDatasetField(name)) && clean(value));
+  return entry?.[1] || '';
+}
+
+function normalizeDatasetField(value) {
+  return String(value ?? '').toLowerCase().replace(/[^a-z0-9]/g, '');
 }
 
 function findLikelyDuplicate(training, name, location, issue) {
   const topic = normalize(issue).split(/\s+/).filter((word) => word.length > 4).slice(0, 5);
   return training.find((record) => {
-    const user = record.Business_User || record.Caller || '';
-    const searchable = `${record.Short_description || ''} ${record.Description || ''}`;
-    return normalize(user) === normalize(name) && normalize(record.Location) === normalize(location) && topic.some((word) => normalize(searchable).includes(word));
+    const user = datasetField(record, 'Business_User', 'Business User', 'u_business_user')
+      || datasetField(record, 'Caller', 'caller_id');
+    const historicalLocation = datasetField(record, 'Location', 'location');
+    const searchable = `${datasetField(record, 'Short_description', 'short_description')} ${datasetField(record, 'Description', 'description')}`;
+    const sameLocation = historicalLocation && normalize(historicalLocation) === normalize(location);
+    return normalize(user) === normalize(name) && sameLocation && topic.some((word) => normalize(searchable).includes(word));
   });
 }
 
@@ -716,20 +747,22 @@ function recommendLocation(training, actualUser, caller, entity) {
   const callerName = normalize(caller);
   const userMatches = userName
     ? training.filter((record) =>
-      normalize(record.Business_User || record['Business User'] || record.Caller) === userName
-      && clean(record.Location))
+      normalize(datasetField(record, 'Business_User', 'Business User', 'u_business_user', 'Caller', 'caller_id')) === userName
+      && datasetField(record, 'Location', 'location'))
     : [];
   const callerMatches = callerName
-    ? training.filter((record) => normalize(record.Caller) === callerName && clean(record.Location))
+    ? training.filter((record) =>
+      normalize(datasetField(record, 'Caller', 'caller_id')) === callerName
+      && datasetField(record, 'Location', 'location'))
     : [];
   const matchingRecords = userMatches.length ? userMatches : callerMatches;
   const normalizedEntity = normalize(entity);
   const entityMatches = matchingRecords.filter((record) => {
-    const location = normalize(record.Location);
+    const location = normalize(datasetField(record, 'Location', 'location'));
     return location.includes(normalizedEntity) || normalizedEntity.includes(location);
   });
   const candidates = (entityMatches.length ? entityMatches : matchingRecords)
-    .map((record) => clean(record.Location));
+    .map((record) => clean(datasetField(record, 'Location', 'location')));
   if (!candidates.length) return { value: entity, source: 'tracker' };
 
   const counts = new Map();
